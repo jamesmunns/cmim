@@ -62,19 +62,19 @@ fn main() -> ! {
 
 #[interrupt]
 fn TIMER1() {
+    // Start the timer again
+    TIMER.try_lock(|timer| {
+        timer.cancel().unwrap();
+        timer.start(1_000_000u32);
+    })
+    .map_err(drop)
+    .unwrap();
+
     // Print
     UART.try_lock(|uart| {
         let mut s: HString<heapless::consts::U1024> = HString::new();
         write!(&mut s, "Blink!\r\n").unwrap();
         uart.write(s.as_bytes()).unwrap();
-    })
-    .map_err(drop)
-    .unwrap();
-
-    // Start the timer again
-    TIMER.try_lock(|timer| {
-        timer.cancel().unwrap();
-        timer.start(1_000_000u32);
     })
     .map_err(drop)
     .unwrap();
