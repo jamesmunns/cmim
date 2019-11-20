@@ -6,7 +6,7 @@ Here's how it should look
 
 ```rust
 use your_pac::Interrupt;
-use to
+use crate::{Foo, Bar};
 
 use cmim::{cmim, cmim_get, cmim_set};
 
