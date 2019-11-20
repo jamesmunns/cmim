@@ -6,8 +6,6 @@ use panic_halt as _;
 
 // String formatting
 use cmim::Move;
-use core::fmt::Write;
-use heapless::String as HString;
 
 // Used to set the program entry point
 use cortex_m_rt::entry;
@@ -25,8 +23,12 @@ use dwm1001::{
     DWM1001,
 };
 
-static UART: Move<Uarte<UARTE0>, Interrupt> = Move::new_uninitialized(Interrupt::TIMER1);
-static TIMER: Move<Timer<TIMER1>, Interrupt> = Move::new_uninitialized(Interrupt::TIMER1);
+static TIMER_1_DATA: Move<Timer1Data, Interrupt> = Move::new_uninitialized(Interrupt::TIMER1);
+
+struct Timer1Data {
+    uart: Uarte<UARTE0>,
+    timer: Timer<TIMER1>,
+}
 
 #[entry]
 fn main() -> ! {
@@ -38,8 +40,10 @@ fn main() -> ! {
     itimer.start(1_000_000u32);
     itimer.enable_interrupt(&mut board.NVIC);
 
-    UART.try_move(board.uart).map_err(drop).unwrap();
-    TIMER.try_move(itimer).map_err(drop).unwrap();
+    TIMER_1_DATA.try_move(Timer1Data {
+        uart: board.uart,
+        timer: itimer,
+    }).map_err(drop).unwrap();
 
     let mut toggle = false;
 
@@ -62,19 +66,18 @@ fn main() -> ! {
 
 #[interrupt]
 fn TIMER1() {
-    // Start the timer again
-    TIMER.try_lock(|timer| {
-        timer.cancel().unwrap();
-        timer.start(1_000_000u32);
-    })
-    .map_err(drop)
-    .unwrap();
+    TIMER_1_DATA.try_lock(|data| {
+        // Start the timer again first for accuracy
+        data.timer.cancel().unwrap();
+        data.timer.start(1_000_000u32);
 
-    // Print
-    UART.try_lock(|uart| {
-        let mut s: HString<heapless::consts::U1024> = HString::new();
-        write!(&mut s, "Blink!\r\n").unwrap();
-        uart.write(s.as_bytes()).unwrap();
+        // Write message to UART. The NRF UART requires data
+        // to be in RAM, not flash.
+        const MSG_BYTES: &[u8] = "Blink!\r\n".as_bytes();
+        let mut buf = [0u8; MSG_BYTES.len()];
+        buf.copy_from_slice(MSG_BYTES);
+
+        data.uart.write(&buf).unwrap();
     })
     .map_err(drop)
     .unwrap();
