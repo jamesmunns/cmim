@@ -1,123 +1,196 @@
 #![no_std]
 
-#[macro_export]
-macro_rules! cmim {
-    (
-        $($name:ident: $ty:ty => $intr:expr,)+
-    ) => {
-        pub(crate) mod cmim_inner {
-            use super::Interrupt;
+use bare_metal::Nr;
+use core::cell::UnsafeCell;
+use core::result::Result;
+use cortex_m::interrupt::free;
+use cortex_m::peripheral::{
+    SCB,
+    scb::VectActive,
+};
+use core::mem::MaybeUninit;
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering;
 
-            pub(crate) struct CmimInnerData<T> {
-                data: ::core::mem::MaybeUninit<T>,
-                inter: Interrupt,
-            }
+pub struct Move<T, I>
+{
+    data: UnsafeCell<MaybeUninit<T>>,
+    state: AtomicUsize,
+    inter: I
+}
 
-            impl<T> CmimInnerData<T> {
-                pub(crate) unsafe fn unsafe_get(&mut self) -> &mut T {
-                    &mut *self.data.as_mut_ptr()
-                }
+impl<T, I> Move<T, I>
+{
+    const UNINIT: usize        = 0;
+    const INIT_AND_IDLE: usize = 1;
+    const LOCKED: usize        = 2;
 
-                pub(crate) unsafe fn unsafe_set(&mut self, input: T) {
-                    self.data.as_mut_ptr().write(input);
-                }
+    pub const fn new_uninitialized(inter: I) -> Self {
+        Move {
+            data: UnsafeCell::new(MaybeUninit::uninit()),
+            inter,
+            state: AtomicUsize::new(Self::UNINIT),
+        }
+    }
 
-                pub(crate) unsafe fn unsafe_get_inter(&self) -> u8 {
-                    ::bare_metal::Nr::nr(&self.inter)
-                }
-            }
-
-            $(
-                pub(crate) static mut $name: CmimInnerData<$ty> = CmimInnerData {
-                    data: ::core::mem::MaybeUninit::uninit(),
-                    inter: $intr
-                };
-            )+
+    pub const fn new(data: T, inter: I) -> Self {
+        Move {
+            data: UnsafeCell::new(MaybeUninit::new(data)),
+            inter,
+            state: AtomicUsize::new(Self::INIT_AND_IDLE),
         }
     }
 }
 
-#[macro_export]
-macro_rules! cmim_set {
-    ($name:ident = $val:expr) => {{
-        // If the interrupt is enabled, return
-        let enabled = {
-            // Note: This is a copy of `NVIC::is_enabled()`, which sadly takes
-            // ownership rather than references
-            let nr = unsafe { crate::cmim_inner::$name.unsafe_get_inter() };
-            let mask = 1 << (nr % 32);
+impl<T, I> Move<T, I>
+where
+    T: Send + Sized,
+    I: Nr
+{
+    /// Attempt to initialize the data of the `Move` structure.
+    /// This *MUST* be called from non-interrupt context, and a critical
+    /// section will be in place while setting the data.
+    ///
+    /// Returns:
+    ///
+    /// * Ok(Some(T)): If we are in thread mode and the data was previously initialized
+    /// * Ok(None): If we are in thread mode and the data was not previously initialized
+    /// * Err(()): If we are not in thread mode (e.g. an interrupt is active)
+    pub fn try_move(&self, data: T) -> Result<Option<T>, T> {
+        free(|_cs| {
+            // Check if we are in non-interrupt context
+            match SCB::vect_active() {
+                // TODO: Would it be reasonable to initialize this from a DIFFERENT
+                // interrupt context? Basically anything but the destination interrupt?
+                VectActive::ThreadMode => {},
+                _ => {
+                    return Err(data);
+                }
+            }
 
-            // NOTE(unsafe) atomic read with no side effects
-            unsafe {
-                ((*::cortex_m::peripheral::NVIC::ptr()).ispr[usize::from(nr / 32)].read() & mask)
-                    == mask
+            // Since we are in a critical section, it is not necessary to perform
+            // an atomic compare and swap, as we cannot be pre-empted
+            match self.state.load(Ordering::SeqCst) {
+                Self::UNINIT => {
+                    unsafe {
+                        let mu_ref = &mut *self.data.get();
+                        let dat_ptr = mu_ref.as_mut_ptr();
+                        dat_ptr.write(data);
+                    }
+                    self.state.store(Self::INIT_AND_IDLE, Ordering::SeqCst);
+                    Ok(None)
+                }
+                Self::INIT_AND_IDLE => {
+                    let old = unsafe {
+                        let mu_ref = &mut *self.data.get();
+                        let dat_ptr = mu_ref.as_mut_ptr();
+                        dat_ptr.replace(data)
+                    };
+                    Ok(Some(old))
+                }
+                Self::LOCKED | _ => {
+                    Err(data)
+                }
+            }
+        })
+    }
+
+    /// Attempt to recover the data from the `Move` structure.
+    /// This *MUST* be called from non-interrupt context, and a critical
+    /// section will be in place while receiving the data.
+    ///
+    /// Returns:
+    ///
+    /// * Ok(Some(T)): If we are in thread mode and the data was previously initialized
+    /// * Ok(None): If we are in thread mode and the data was not previously initialized
+    /// * Err(()): If we are not in thread mode (e.g. an interrupt is active)
+    pub fn try_free(&self) -> Result<Option<T>, ()> {
+        free(|_cs| {
+            // Check if we are in non-interrupt context
+            match SCB::vect_active() {
+                // TODO: Would it be reasonable to free this from a DIFFERENT
+                // interrupt context? Basically anything but the destination interrupt?
+                VectActive::ThreadMode => {},
+                _ => {
+                    return Err(());
+                }
+            }
+
+            // Since we are in a critical section, it is not necessary to perform
+            // an atomic compare and swap, as we cannot be pre-empted
+            match self.state.load(Ordering::SeqCst) {
+                Self::UNINIT => {
+                    Ok(None)
+                }
+                Self::INIT_AND_IDLE => {
+                    let old = unsafe {
+                        let mu_ptr = self.data.get();
+                        mu_ptr.replace(MaybeUninit::uninit()).assume_init()
+                    };
+
+                    self.state.store(Self::UNINIT, Ordering::SeqCst);
+
+                    Ok(Some(old))
+                }
+                Self::LOCKED | _ => {
+                    Err(())
+                }
+            }
+        })
+    }
+
+    /// So, this isn't a classical mutex. It will *only* provide access if:
+    ///
+    /// * The selected interrupt is currently active
+    /// * The mutex has not already been locked
+    ///
+    /// If these conditions are met, then you can access the variable from within
+    /// a closure
+    pub fn try_lock<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<R, ()> {
+        match SCB::vect_active() {
+            VectActive::Interrupt{ irqn } if irqn == self.inter.nr() => {
+                // Okay to go ahead
+            }
+            _ => {
+                return Err(())
             }
         };
 
-        if enabled {
-            Err(())
-        } else {
-            unsafe {
-                crate::cmim_inner::$name.unsafe_set($val);
-                Ok(())
-            }
-        }
-    }};
-}
+        // We know that the current interrupt is active, which means
+        // that thread mode cannot resume until we exit this function.
+        // We don't need to worry about compare and swap, because we
+        // are now the only ones who can access this data
+        match self.state.load(Ordering::SeqCst) {
 
-/// This macro is dangerous for multiple reasons:
-/// * It has no re-entrancy check, so you could totally get multiple
-///   mutable references in scope at the same time if you use it more than once
-/// * It has no check to see if you've actually ever set the data, which means
-//    that you could totally get uninitialized memory
-#[macro_export]
-macro_rules! cmim_get {
-    ($name: ident) => {
-        if let ::cortex_m::peripheral::scb::VectActive::Interrupt { irqn } =
-            ::cortex_m::peripheral::SCB::vect_active()
-        {
-            if irqn == unsafe { crate::cmim_inner::$name.unsafe_get_inter() } {
-                Ok(unsafe { crate::cmim_inner::$name.unsafe_get() })
-            } else {
+            // The data is uninitialized. Don't provide access
+            Self::UNINIT => {
                 Err(())
             }
-        } else {
-            Err(())
+
+            // The data is initialized, allow access within a closure
+            // This prevents re-entrancy of re-calling lock within the
+            // closure
+            Self::INIT_AND_IDLE => {
+                self.state.store(Self::LOCKED, Ordering::SeqCst);
+
+                let dat_ref = unsafe {
+                    let mu_ref = &mut *self.data.get();
+                    let dat_ptr = mu_ref.as_mut_ptr();
+                    &mut *dat_ptr
+                };
+
+                let ret = f(dat_ref);
+
+                self.state.store(Self::INIT_AND_IDLE, Ordering::SeqCst);
+
+                Ok(ret)
+            }
+
+            // The data is locked, or the status register is garbage.
+            // Don't provide access
+            Self::LOCKED | _ => {
+                Err(())
+            }
         }
-    };
-}
-
-#[cfg(feature = "nope")]
-mod test {
-
-    #[derive(Copy, Clone)]
-    pub enum Interrupt {
-        RADIO,
-        VIDEO,
-        AUDIO,
-    }
-
-    unsafe impl Nr for Interrupt {
-        fn nr(&self) -> u8 {
-            return 0;
-        }
-    }
-
-    cmim! {
-        FOO: bool => Interrupt::RADIO,
-        BAR: u32  => Interrupt::VIDEO,
-        BAZ: u64  => Interrupt::AUDIO,
-    }
-
-    use cortex_m::interrupt::Nr;
-    use cortex_m::peripheral::scb::VectActive;
-    use cortex_m::peripheral::{NVIC, SCB};
-
-    fn main() {
-        cmim_set!(BAZ, 64u64).unwrap();
-    }
-
-    fn interrupt() {
-        let x = cmim_get!(BAZ).unwrap();
     }
 }
