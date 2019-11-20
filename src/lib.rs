@@ -5,32 +5,35 @@ macro_rules! cmim {
     (
         $($name:ident: $ty:ty => $intr:expr,)+
     ) => {
-        struct Inner<T> {
-            data: ::core::mem::MaybeUninit<T>,
-            inter: Interrupt,
+        pub(crate) mod cmim_inner {
+            use super::Interrupt;
+
+            pub(crate) struct CmimInnerData<T> {
+                data: ::core::mem::MaybeUninit<T>,
+                inter: Interrupt,
+            }
+
+            impl<T> CmimInnerData<T> {
+                pub(crate) unsafe fn unsafe_get(&mut self) -> &mut T {
+                    &mut *self.data.as_mut_ptr()
+                }
+
+                pub(crate) unsafe fn unsafe_set(&mut self, input: T) {
+                    self.data.as_mut_ptr().write(input);
+                }
+
+                pub(crate) unsafe fn unsafe_get_inter(&self) -> u8 {
+                    ::bare_metal::Nr::nr(&self.inter)
+                }
+            }
+
+            $(
+                pub(crate) static mut $name: CmimInnerData<$ty> = CmimInnerData {
+                    data: ::core::mem::MaybeUninit::uninit(),
+                    inter: $intr
+                };
+            )+
         }
-
-        impl<T> Inner<T> {
-            pub(crate) unsafe fn unsafe_get(&mut self) -> &mut T {
-                &mut *self.data.as_mut_ptr()
-            }
-
-            pub(crate) unsafe fn unsafe_set(&mut self, input: T) {
-                self.data.as_mut_ptr().write(input);
-            }
-
-            pub(crate) unsafe fn unsafe_get_inter(&self) -> u8 {
-                use ::bare_metal::Nr;
-                self.inter.nr()
-            }
-        }
-
-        $(
-            static mut $name: Inner<$ty> = Inner {
-                data: ::core::mem::MaybeUninit::uninit(),
-                inter: $intr
-            };
-        )+
     }
 }
 
@@ -41,7 +44,7 @@ macro_rules! cmim_set {
         let enabled = {
             // Note: This is a copy of `NVIC::is_enabled()`, which sadly takes
             // ownership rather than references
-            let nr = unsafe { $name.unsafe_get_inter() };
+            let nr = unsafe { crate::cmim_inner::$name.unsafe_get_inter() };
             let mask = 1 << (nr % 32);
 
             // NOTE(unsafe) atomic read with no side effects
@@ -55,21 +58,26 @@ macro_rules! cmim_set {
             Err(())
         } else {
             unsafe {
-                $name.unsafe_set($val);
+                crate::cmim_inner::$name.unsafe_set($val);
                 Ok(())
             }
         }
     }};
 }
 
+/// This macro is dangerous for multiple reasons:
+/// * It has no re-entrancy check, so you could totally get multiple
+///   mutable references in scope at the same time if you use it more than once
+/// * It has no check to see if you've actually ever set the data, which means
+//    that you could totally get uninitialized memory
 #[macro_export]
 macro_rules! cmim_get {
     ($name: ident) => {
         if let ::cortex_m::peripheral::scb::VectActive::Interrupt { irqn } =
             ::cortex_m::peripheral::SCB::vect_active()
         {
-            if irqn == unsafe { $name.unsafe_get_inter() } {
-                Ok(unsafe { $name.unsafe_get() })
+            if irqn == unsafe { crate::cmim_inner::$name.unsafe_get_inter() } {
+                Ok(unsafe { crate::cmim_inner::$name.unsafe_get() })
             } else {
                 Err(())
             }
