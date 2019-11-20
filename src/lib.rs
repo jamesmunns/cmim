@@ -19,6 +19,12 @@ pub struct Move<T, I>
     inter: I
 }
 
+unsafe impl<T, I> Sync for Move<T, I>
+where
+    T: Send + Sized,
+    I: Nr
+{}
+
 impl<T, I> Move<T, I>
 {
     const UNINIT: usize        = 0;
