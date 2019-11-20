@@ -1,6 +1,6 @@
 [package]
 name = "cmim"
-version = "0.1.0"
+version = "0.1.1"
 description = "Move your data to interrupt context"
 repository = "https://github.com/jamesmunns/cmim"
 authors = ["James Munns <james.munns@ferrous-systems.com>"]
