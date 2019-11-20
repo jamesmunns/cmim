@@ -8,18 +8,53 @@ macro_rules! cmim {
         pub(crate) mod cmim_inner {
             use super::Interrupt;
 
+            const UNINIT:    usize = 0;
+            const INIT_IDLE: usize = 1;
+
+            // TODO: Detecting busy means that we need to have
+            // a wrapper type that moves from BUSY => INIT_IDLE
+            // on drop
+            const _BUSY:      usize = 2;
+
             pub(crate) struct CmimInnerData<T> {
                 data: ::core::mem::MaybeUninit<T>,
                 inter: Interrupt,
+                #[cfg(not(feature = "no_atomics"))]
+                status: ::core::sync::atomic::AtomicUsize;
             }
 
             impl<T> CmimInnerData<T> {
-                pub(crate) unsafe fn unsafe_get(&mut self) -> &mut T {
-                    &mut *self.data.as_mut_ptr()
+                #[cfg(not(feature = "no_atomics"))]
+                pub(crate) unsafe fn unsafe_get(&mut self) -> ::core::result::Result<&mut T, ()> {
+                    if self.status.load(::core::sync::atomic::Ordering::SeqCst) != INIT_IDLE {
+                        Err(())
+                    } else {
+                        // TODO: CAS to busy if IDLE
+                        Ok(&mut *self.data.as_mut_ptr())
+                    }
+
+                    /*
+                        if self.status.compare_and_swap(
+                            INIT_IDLE,
+                            BUSY,
+                            ::core::sync::atomic::Ordering::SeqCst
+                        ) != INIT_IDLE {
+                            Err(())
+                        } else {
+                            &mut *self.data.as_mut_ptr()
+                        }
+                    */
+
+                }
+
+                #[cfg(feature = "no_atomics")]
+                pub(crate) unsafe fn unsafe_get(&mut self) -> ::core::result::Result<&mut T, ()> {
+                    Ok(&mut *self.data.as_mut_ptr())
                 }
 
                 pub(crate) unsafe fn unsafe_set(&mut self, input: T) {
                     self.data.as_mut_ptr().write(input);
+                    self.status.store(INIT_IDLE, ::core::sync::atomic::Ordering::SeqCst);
                 }
 
                 pub(crate) unsafe fn unsafe_get_inter(&self) -> u8 {
@@ -30,7 +65,10 @@ macro_rules! cmim {
             $(
                 pub(crate) static mut $name: CmimInnerData<$ty> = CmimInnerData {
                     data: ::core::mem::MaybeUninit::uninit(),
-                    inter: $intr
+                    inter: $intr,
+
+                    #[cfg(not(feature = "no_atomics"))]
+                    status: ::core::sync::atomic::AtomicUsize(UNINIT),
                 };
             )+
         }
@@ -77,7 +115,7 @@ macro_rules! cmim_get {
             ::cortex_m::peripheral::SCB::vect_active()
         {
             if irqn == unsafe { crate::cmim_inner::$name.unsafe_get_inter() } {
-                Ok(unsafe { crate::cmim_inner::$name.unsafe_get() })
+                unsafe { crate::cmim_inner::$name.unsafe_get() }
             } else {
                 Err(())
             }
