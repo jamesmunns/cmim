@@ -2,6 +2,8 @@
 
 It's the next best thing to moving to interrupt context.
 
+> NOTE: This is not yet well tested. At all. Use at your own risk
+
 Here's how it should look
 
 ```rust
