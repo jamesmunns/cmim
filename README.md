@@ -4,7 +4,13 @@ It's the next best thing to moving to interrupt context.
 
 > NOTE: This is not yet well tested. At all. Use at your own risk
 
-Here's how it should look
+## The goal
+
+The goal here is to replace usage of a mutex which may cause an entire critical section, and instead model "Moving" of data to an interrupt context.
+
+This means that we don't need a critical section to access it, we just need to be in the interrupt we moved the data to.
+
+Here's how it should look:
 
 ```rust
 use your_pac::Interrupt;
