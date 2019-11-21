@@ -1,4 +1,4 @@
-///! # Cortex-M Interrupt Move
+//! # Cortex-M Interrupt Move
 //!
 //! It's the next best thing to moving to interrupt context.
 //!
