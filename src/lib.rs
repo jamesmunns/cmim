@@ -55,6 +55,15 @@ impl<T, I> Move<T, I> {
     /// The data is initialized, but currently locked by an interrupt
     const LOCKED: usize = 2;
 
+    /// Create a new `Move` structure without initializing the data contained by it.
+    /// This is best used when the data cannot be initialized until runtime, such as
+    /// a HAL peripheral, or the producer or consumer of a queue.
+    ///
+    /// Before using this in interrupt context, you must initialize it with the
+    /// `try_move` function, or it will return errors upon access.
+    ///
+    /// You must provide the interrupt that is allowed to later access this data
+    /// as the `inter` argument
     pub const fn new_uninitialized(inter: I) -> Self {
         Move {
             data: UnsafeCell::new(MaybeUninit::uninit()),
@@ -63,6 +72,14 @@ impl<T, I> Move<T, I> {
         }
     }
 
+    /// Create a new `Move` structure, and initialize the data contained within it.
+    /// This is best used when the data contained within is `const`, and doesn't require
+    /// runtime initialization.
+    ///
+    /// This does not require further interaction before use in interrupt context.
+    ///
+    /// You must provide the interrupt that is allowed to later access this data
+    /// as the `inter` argument
     pub const fn new(data: T, inter: I) -> Self {
         Move {
             data: UnsafeCell::new(MaybeUninit::new(data)),
