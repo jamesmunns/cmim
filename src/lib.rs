@@ -85,7 +85,8 @@ where
     ///
     /// * Ok(Some(T)): If we are in thread mode and the data was previously initialized
     /// * Ok(None): If we are in thread mode and the data was not previously initialized
-    /// * Err(()): If we are not in thread mode (e.g. an interrupt is active)
+    /// * Err(T): If we are not in thread mode (e.g. an interrupt is active), return the
+    ///     data that was going to be moved
     pub fn try_move(&self, data: T) -> Result<Option<T>, T> {
         free(|_cs| {
             // Check if we are in non-interrupt context
