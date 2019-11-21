@@ -19,6 +19,11 @@ use core::sync::atomic::Ordering;
 use cortex_m::interrupt::free;
 use cortex_m::peripheral::{scb::VectActive, SCB};
 
+/// Move is a structure that is intended to be stored as a static variable,
+/// and represents a metaphorical "move" to an interrupt context. Data is moved
+/// to the interrupt context by calling `try_move` from thread (non-interrupt)
+/// context, and the data can be retrived within a selected interrupt using the
+/// `try_lock` method.
 pub struct Move<T, I> {
     /// `data` contains the user data, which may or may not be initialized
     data: UnsafeCell<MaybeUninit<T>>,
@@ -39,11 +44,6 @@ where
 {
 }
 
-/// Move is a structure that is intended to be stored as a static variable,
-/// and represents a metaphorical "move" to an interrupt context. Data is moved
-/// to the interrupt context by calling `try_move` from thread (non-interrupt)
-/// context, and the data can be retrived within a selected interrupt using the
-/// `try_lock` method.
 impl<T, I> Move<T, I> {
 
     /// The data is uninitialized

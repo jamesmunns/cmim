@@ -15,10 +15,9 @@ use embedded_hal::timer::Cancel;
 // Provides definitions for our development board
 use dwm1001::{
     nrf52832_hal::{
-        nrf52832_pac::{interrupt, Interrupt, UARTE0, TIMER1},
+        nrf52832_pac::{interrupt, Interrupt, TIMER1, UARTE0},
         prelude::*,
-        Uarte,
-        Timer,
+        Timer, Uarte,
     },
     DWM1001,
 };
@@ -28,6 +27,8 @@ static TIMER_1_DATA: Move<Timer1Data, Interrupt> = Move::new_uninitialized(Inter
 struct Timer1Data {
     uart: Uarte<UARTE0>,
     timer: Timer<TIMER1>,
+    led: dwm1001::Led,
+    toggle: bool,
 }
 
 #[entry]
@@ -40,10 +41,15 @@ fn main() -> ! {
     itimer.start(1_000_000u32);
     itimer.enable_interrupt(&mut board.NVIC);
 
-    TIMER_1_DATA.try_move(Timer1Data {
-        uart: board.uart,
-        timer: itimer,
-    }).map_err(drop).unwrap();
+    TIMER_1_DATA
+        .try_move(Timer1Data {
+            uart: board.uart,
+            timer: itimer,
+            led: board.leds.D9,
+            toggle: false,
+        })
+        .map_err(drop)
+        .unwrap();
 
     let mut toggle = false;
 
@@ -66,19 +72,29 @@ fn main() -> ! {
 
 #[interrupt]
 fn TIMER1() {
-    TIMER_1_DATA.try_lock(|data| {
-        // Start the timer again first for accuracy
-        data.timer.cancel().unwrap();
-        data.timer.start(1_000_000u32);
+    TIMER_1_DATA
+        .try_lock(|data| {
+            // Start the timer again first for accuracy
+            data.timer.cancel().unwrap();
+            data.timer.start(1_000_000u32);
 
-        // Write message to UART. The NRF UART requires data
-        // to be in RAM, not flash.
-        const MSG_BYTES: &[u8] = "Blink!\r\n".as_bytes();
-        let mut buf = [0u8; MSG_BYTES.len()];
-        buf.copy_from_slice(MSG_BYTES);
+            // Write message to UART. The NRF UART requires data
+            // to be in RAM, not flash.
+            const MSG_BYTES: &[u8] = "Blink!\r\n".as_bytes();
+            let mut buf = [0u8; MSG_BYTES.len()];
+            buf.copy_from_slice(MSG_BYTES);
 
-        data.uart.write(&buf).unwrap();
-    })
-    .map_err(drop)
-    .unwrap();
+            data.uart.write(&buf).unwrap();
+
+            // Blink the LED
+            if data.toggle {
+                data.led.enable();
+            } else {
+                data.led.disable();
+            }
+
+            data.toggle = !data.toggle;
+        })
+        .map_err(drop)
+        .unwrap();
 }
