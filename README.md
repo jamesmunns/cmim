@@ -2,8 +2,6 @@
 
 It's the next best thing to moving to interrupt context.
 
-> NOTE: This is not yet well tested. At all. Use at your own risk
-
 ## Examples
 
 Check out the full examples in the [`app-examples`](./app-examples) folder.
@@ -17,26 +15,26 @@ This means that we don't need a critical section to access it, we just need to b
 Here's how it works:
 
 ```rust
-use your_pac::Interrupt;
-use crate::{Foo, Bar};
-
+use nrf52832_hal::nrf52832_pac::{self, interrupt, Interrupt, NVIC};
+use cortex_m::asm::wfi;
+use cortex_m_rt::entry;
 use cmim::{Move};
 
 // Define your global variables, and what
 // interrupt they are allowed to be used from
 
 // These variables are initialized at runtime
-static FOO: Move<Foo, Interrupt> = Move::new_uninitialized(Interrupt::UART0);
-static BAR: Move<Bar, Interrupt> = Move::new_uninitialized(Interrupt::UART0);
+static FOO: Move<Foo, Interrupt> = Move::new_uninitialized(Interrupt::UARTE0_UART0);
+static BAR: Move<Bar, Interrupt> = Move::new_uninitialized(Interrupt::UARTE0_UART0);
 
 // These variables are const initialized. This probably isn't super useful vs just
 // having a static variable inside the function, but would allow you to later send
 // new data to the interrupt.
-static BAZ: Move<u64, Interrupt> = Move::new(123u64, Interrupt::ADC0);
+static BAZ: Move<u64, Interrupt> = Move::new(123u64, Interrupt::TIMER0);
 
 #[entry]
 fn main() -> ! {
-    let periphs = your_pac::CorePeripherals::take().unwrap();
+    let periphs = nrf52832_pac::CorePeripherals::take().unwrap();
 
     let mut nvic = periphs.NVIC;
 
@@ -51,8 +49,10 @@ fn main() -> ! {
     assert_eq!(BAZ.try_move(456u64), Ok(Some(123u64)));
 
     // Now you can enable the interrupts
-    nvic.enable(Interrupt::UART0);
-    nvic.enable(Interrupt::ADC0);
+    unsafe {
+        NVIC::unmask(Interrupt::UARTE0_UART0);
+        NVIC::unmask(Interrupt::TIMER0);
+    }
 
     loop {
         wfi();
@@ -60,7 +60,7 @@ fn main() -> ! {
 }
 
 #[interrupt]
-fn UART0() {
+fn UARTE0_UART0() {
     // You're allowed to access any data you've
     // "given" to the interrupt. You'll get a
     // mutable reference to your data inside of
@@ -86,11 +86,11 @@ fn UART0() {
 
 fn uart0_inner(foo: &mut Foo, bar: &mut Bar) {
     foo.some_foo_method();
-    bar.some_mut_bar_method();
+    bar.some_bar_method();
 }
 
 #[interrupt]
-fn ADC0() {
+fn TIMER0() {
     BAZ.try_lock(|baz| {
         // Do something with baz...
     }).unwrap();

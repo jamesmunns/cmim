@@ -1,6 +1,6 @@
 [package]
 name = "cmim"
-version = "0.1.2"
+version = "0.1.3"
 description = "Move your data to interrupt context"
 repository = "https://github.com/jamesmunns/cmim"
 authors = ["James Munns <james.munns@ferrous-systems.com>"]
@@ -17,6 +17,11 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 bare-metal = "0.2"
 cortex-m   = "0.6"
+
+[dev-dependencies]
+# These are used for building the doctests
+nrf52832-hal = { version = "0.8", features = ["rt"] }
+cortex-m-rt = { version = "0.6" }
 
 [package.metadata.docs.rs]
 all-features = true
