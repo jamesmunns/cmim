@@ -5,15 +5,20 @@
 use panic_halt as _;
 
 // String formatting
-use cmim::Move;
+use cmim::{
+    Move,
+    Context,
+    Exception,
+};
 
 // Used to set the program entry point
-use cortex_m_rt::entry;
+use cortex_m_rt::{entry, exception};
 
 use embedded_hal::timer::Cancel;
 
 // Provides definitions for our development board
 use dwm1001::{
+    cortex_m::peripheral::syst::SystClkSource::Core,
     nrf52832_hal::{
         nrf52832_pac::{interrupt, Interrupt, TIMER1, UARTE0},
         prelude::*,
@@ -22,11 +27,17 @@ use dwm1001::{
     DWM1001,
 };
 
-static TIMER_1_DATA: Move<Timer1Data, Interrupt> = Move::new_uninitialized(Interrupt::TIMER1);
+static TIMER_1_DATA: Move<Timer1Data, Interrupt> = Move::new_uninitialized(Context::Interrupt(Interrupt::TIMER1));
+static SYSTICK_DATA: Move<SysTickData, Interrupt> = Move::new_uninitialized(Context::Exception(Exception::SysTick));
 
 struct Timer1Data {
     uart: Uarte<UARTE0>,
     timer: Timer<TIMER1>,
+    led: dwm1001::Led,
+    toggle: bool,
+}
+
+struct SysTickData {
     led: dwm1001::Led,
     toggle: bool,
 }
@@ -41,11 +52,25 @@ fn main() -> ! {
     itimer.start(1_000_000u32);
     itimer.enable_interrupt(&mut board.NVIC);
 
+    // Core clock is 64MHz, blink at 16Hz
+    board.SYST.set_clock_source(Core);
+    board.SYST.set_reload(4_000_000 - 1);
+    board.SYST.enable_counter();
+    board.SYST.enable_interrupt();
+
     TIMER_1_DATA
         .try_move(Timer1Data {
             uart: board.uart,
             timer: itimer,
             led: board.leds.D9,
+            toggle: false,
+        })
+        .map_err(drop)
+        .unwrap();
+
+    SYSTICK_DATA
+        .try_move(SysTickData {
+            led: board.leds.D12,
             toggle: false,
         })
         .map_err(drop)
@@ -68,6 +93,23 @@ fn main() -> ! {
 
         timer.delay(250_000);
     }
+}
+
+#[exception]
+fn SysTick() {
+    SYSTICK_DATA
+        .try_lock(|data| {
+            // Blink the LED
+            if data.toggle {
+                data.led.enable();
+            } else {
+                data.led.disable();
+            }
+
+            data.toggle = !data.toggle;
+        })
+        .map_err(drop)
+        .unwrap();
 }
 
 #[interrupt]
