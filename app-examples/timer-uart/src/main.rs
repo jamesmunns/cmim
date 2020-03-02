@@ -4,16 +4,21 @@
 // Panic provider crate
 use panic_halt as _;
 
-// String formatting
-use cmim::Move;
+// CMIM items
+use cmim::{
+    Move,
+    Context,
+    Exception,
+};
 
 // Used to set the program entry point
-use cortex_m_rt::entry;
+use cortex_m_rt::{entry, exception};
 
 use embedded_hal::timer::Cancel;
 
 // Provides definitions for our development board
 use dwm1001::{
+    cortex_m::peripheral::syst::SystClkSource::Core,
     nrf52832_hal::{
         nrf52832_pac::{interrupt, Interrupt, TIMER1, UARTE0},
         prelude::*,
@@ -22,7 +27,8 @@ use dwm1001::{
     DWM1001,
 };
 
-static TIMER_1_DATA: Move<Timer1Data, Interrupt> = Move::new_uninitialized(Interrupt::TIMER1);
+static TIMER_1_DATA: Move<Timer1Data, Interrupt> = Move::new_uninitialized(Context::Interrupt(Interrupt::TIMER1));
+static SYSTICK_DATA: Move<SysTickData, Interrupt> = Move::new_uninitialized(Context::Exception(Exception::SysTick));
 
 struct Timer1Data {
     uart: Uarte<UARTE0>,
@@ -31,43 +37,81 @@ struct Timer1Data {
     toggle: bool,
 }
 
+struct SysTickData {
+    led: dwm1001::Led,
+    toggle: bool,
+}
+
 #[entry]
 fn main() -> ! {
-    let mut board = DWM1001::take().unwrap();
-    let mut timer = board.TIMER0.constrain();
-    let mut _rng = board.RNG.constrain();
+    if let Some(mut board) = DWM1001::take() {
+        let mut timer = board.TIMER0.constrain();
+        let mut _rng = board.RNG.constrain();
 
-    let mut itimer = board.TIMER1.constrain();
-    itimer.start(1_000_000u32);
-    itimer.enable_interrupt(&mut board.NVIC);
+        let mut itimer = board.TIMER1.constrain();
+        itimer.start(1_000_000u32);
+        itimer.enable_interrupt(&mut board.NVIC);
 
-    TIMER_1_DATA
-        .try_move(Timer1Data {
-            uart: board.uart,
-            timer: itimer,
-            led: board.leds.D9,
-            toggle: false,
-        })
-        .map_err(drop)
-        .unwrap();
+        // Core clock is 64MHz, blink at 16Hz
+        board.SYST.set_clock_source(Core);
+        board.SYST.set_reload(4_000_000 - 1);
+        board.SYST.enable_counter();
+        board.SYST.enable_interrupt();
 
-    let mut toggle = false;
+        TIMER_1_DATA
+            .try_move(Timer1Data {
+                uart: board.uart,
+                timer: itimer,
+                led: board.leds.D9,
+                toggle: false,
+            })
+            .ok();
+
+        SYSTICK_DATA
+            .try_move(SysTickData {
+                led: board.leds.D12,
+                toggle: false,
+            })
+            .ok();
+
+        let mut toggle = false;
+
+        loop {
+            // board.leds.D9  - Top LED GREEN
+            // board.leds.D12 - Top LED RED
+            // board.leds.D11 - Bottom LED RED
+            // board.leds.D10 - Bottom LED BLUE
+            if toggle {
+                board.leds.D10.enable();
+            } else {
+                board.leds.D10.disable();
+            }
+
+            toggle = !toggle;
+
+            timer.delay(250_000);
+        }
+    }
 
     loop {
-        // board.leds.D9  - Top LED GREEN
-        // board.leds.D12 - Top LED RED
-        // board.leds.D11 - Bottom LED RED
-        // board.leds.D10 - Bottom LED BLUE
-        if toggle {
-            board.leds.D10.enable();
-        } else {
-            board.leds.D10.disable();
-        }
-
-        toggle = !toggle;
-
-        timer.delay(250_000);
+        continue;
     }
+}
+
+#[exception]
+fn SysTick() {
+    SYSTICK_DATA
+        .try_lock(|data| {
+            // Blink the LED
+            if data.toggle {
+                data.led.enable();
+            } else {
+                data.led.disable();
+            }
+
+            data.toggle = !data.toggle;
+        })
+        .ok();
 }
 
 #[interrupt]
@@ -95,6 +139,5 @@ fn TIMER1() {
 
             data.toggle = !data.toggle;
         })
-        .map_err(drop)
-        .unwrap();
+        .ok();
 }
