@@ -4,7 +4,7 @@
 // Panic provider crate
 use panic_halt as _;
 
-// String formatting
+// CMIM items
 use cmim::{
     Move,
     Context,
@@ -44,54 +44,57 @@ struct SysTickData {
 
 #[entry]
 fn main() -> ! {
-    let mut board = DWM1001::take().unwrap();
-    let mut timer = board.TIMER0.constrain();
-    let mut _rng = board.RNG.constrain();
+    if let Some(mut board) = DWM1001::take() {
+        let mut timer = board.TIMER0.constrain();
+        let mut _rng = board.RNG.constrain();
 
-    let mut itimer = board.TIMER1.constrain();
-    itimer.start(1_000_000u32);
-    itimer.enable_interrupt(&mut board.NVIC);
+        let mut itimer = board.TIMER1.constrain();
+        itimer.start(1_000_000u32);
+        itimer.enable_interrupt(&mut board.NVIC);
 
-    // Core clock is 64MHz, blink at 16Hz
-    board.SYST.set_clock_source(Core);
-    board.SYST.set_reload(4_000_000 - 1);
-    board.SYST.enable_counter();
-    board.SYST.enable_interrupt();
+        // Core clock is 64MHz, blink at 16Hz
+        board.SYST.set_clock_source(Core);
+        board.SYST.set_reload(4_000_000 - 1);
+        board.SYST.enable_counter();
+        board.SYST.enable_interrupt();
 
-    TIMER_1_DATA
-        .try_move(Timer1Data {
-            uart: board.uart,
-            timer: itimer,
-            led: board.leds.D9,
-            toggle: false,
-        })
-        .map_err(drop)
-        .unwrap();
+        TIMER_1_DATA
+            .try_move(Timer1Data {
+                uart: board.uart,
+                timer: itimer,
+                led: board.leds.D9,
+                toggle: false,
+            })
+            .ok();
 
-    SYSTICK_DATA
-        .try_move(SysTickData {
-            led: board.leds.D12,
-            toggle: false,
-        })
-        .map_err(drop)
-        .unwrap();
+        SYSTICK_DATA
+            .try_move(SysTickData {
+                led: board.leds.D12,
+                toggle: false,
+            })
+            .ok();
 
-    let mut toggle = false;
+        let mut toggle = false;
+
+        loop {
+            // board.leds.D9  - Top LED GREEN
+            // board.leds.D12 - Top LED RED
+            // board.leds.D11 - Bottom LED RED
+            // board.leds.D10 - Bottom LED BLUE
+            if toggle {
+                board.leds.D10.enable();
+            } else {
+                board.leds.D10.disable();
+            }
+
+            toggle = !toggle;
+
+            timer.delay(250_000);
+        }
+    }
 
     loop {
-        // board.leds.D9  - Top LED GREEN
-        // board.leds.D12 - Top LED RED
-        // board.leds.D11 - Bottom LED RED
-        // board.leds.D10 - Bottom LED BLUE
-        if toggle {
-            board.leds.D10.enable();
-        } else {
-            board.leds.D10.disable();
-        }
-
-        toggle = !toggle;
-
-        timer.delay(250_000);
+        continue;
     }
 }
 
@@ -108,8 +111,7 @@ fn SysTick() {
 
             data.toggle = !data.toggle;
         })
-        .map_err(drop)
-        .unwrap();
+        .ok();
 }
 
 #[interrupt]
@@ -137,6 +139,5 @@ fn TIMER1() {
 
             data.toggle = !data.toggle;
         })
-        .map_err(drop)
-        .unwrap();
+        .ok();
 }
