@@ -15,101 +15,148 @@ This means that we don't need a critical section to access it, we just need to b
 Here's how it works:
 
 ```rust
-use nrf52832_hal::nrf52832_pac::{self, interrupt, Interrupt, NVIC};
-use cortex_m::asm::wfi;
-use cortex_m_rt::entry;
-use cmim::{Move};
+#![no_std]
+#![no_main]
 
-// Define your global variables, and what
-// interrupt they are allowed to be used from
+// Panic provider crate
+use panic_halt as _;
 
-// These variables are initialized at runtime
-static FOO: Move<Foo, Interrupt> = Move::new_uninitialized(Interrupt::UARTE0_UART0);
-static BAR: Move<Bar, Interrupt> = Move::new_uninitialized(Interrupt::UARTE0_UART0);
+// CMIM items
+use cmim::{
+    Move,
+    Context,
+    Exception,
+};
 
-// These variables are const initialized. This probably isn't super useful vs just
-// having a static variable inside the function, but would allow you to later send
-// new data to the interrupt.
-static BAZ: Move<u64, Interrupt> = Move::new(123u64, Interrupt::TIMER0);
+// Used to set the program entry point
+use cortex_m_rt::{entry, exception};
+
+use embedded_hal::timer::Cancel;
+
+// Provides definitions for our development board
+use dwm1001::{
+    cortex_m::peripheral::syst::SystClkSource::Core,
+    nrf52832_hal::{
+        nrf52832_pac::{interrupt, Interrupt, TIMER1, UARTE0},
+        prelude::*,
+        Timer, Uarte,
+    },
+    DWM1001,
+};
+
+static TIMER_1_DATA: Move<Timer1Data, Interrupt> = Move::new_uninitialized(Context::Interrupt(Interrupt::TIMER1));
+static SYSTICK_DATA: Move<SysTickData, Interrupt> = Move::new_uninitialized(Context::Exception(Exception::SysTick));
+
+struct Timer1Data {
+    uart: Uarte<UARTE0>,
+    timer: Timer<TIMER1>,
+    led: dwm1001::Led,
+    toggle: bool,
+}
+
+struct SysTickData {
+    led: dwm1001::Led,
+    toggle: bool,
+}
 
 #[entry]
 fn main() -> ! {
-    let periphs = nrf52832_pac::CorePeripherals::take().unwrap();
+    if let Some(mut board) = DWM1001::take() {
+        let mut timer = board.TIMER0.constrain();
+        let mut _rng = board.RNG.constrain();
 
-    let mut nvic = periphs.NVIC;
+        let mut itimer = board.TIMER1.constrain();
+        itimer.start(1_000_000u32);
+        itimer.enable_interrupt(&mut board.NVIC);
 
-    // Data *MUST* be initialized from non-interrupt context. A critical
-    // section will be used when initializing the data.
-    //
-    // Since this data has never been initialized before, these will return Ok(None).
-    assert!(FOO.try_move(Foo::default()).unwrap().is_none());
-    assert!(BAR.try_move(Bar::with_settings(123, 456)).unwrap().is_none());
+        // Core clock is 64MHz, blink at 16Hz
+        board.SYST.set_clock_source(Core);
+        board.SYST.set_reload(4_000_000 - 1);
+        board.SYST.enable_counter();
+        board.SYST.enable_interrupt();
 
-    // Since this data WAS initialized, we will get the old data back as Ok(Some(T))
-    assert_eq!(BAZ.try_move(456u64), Ok(Some(123u64)));
+        TIMER_1_DATA
+            .try_move(Timer1Data {
+                uart: board.uart,
+                timer: itimer,
+                led: board.leds.D9,
+                toggle: false,
+            })
+            .ok();
 
-    // Now you can enable the interrupts
-    unsafe {
-        NVIC::unmask(Interrupt::UARTE0_UART0);
-        NVIC::unmask(Interrupt::TIMER0);
+        SYSTICK_DATA
+            .try_move(SysTickData {
+                led: board.leds.D12,
+                toggle: false,
+            })
+            .ok();
+
+        let mut toggle = false;
+
+        loop {
+            // board.leds.D9  - Top LED GREEN
+            // board.leds.D12 - Top LED RED
+            // board.leds.D11 - Bottom LED RED
+            // board.leds.D10 - Bottom LED BLUE
+            if toggle {
+                board.leds.D10.enable();
+            } else {
+                board.leds.D10.disable();
+            }
+
+            toggle = !toggle;
+
+            timer.delay(250_000);
+        }
     }
 
     loop {
-        wfi();
+        continue;
     }
 }
 
-#[interrupt]
-fn UARTE0_UART0() {
-    // You're allowed to access any data you've
-    // "given" to the interrupt. You'll get a
-    // mutable reference to your data inside of
-    // a closure.
-    //
-    // You can either stack closures like this, or
-    // just use a single struct containing all data.
-    //
-    // You will only get an error if:
-    //
-    // 1. You try to lock the same data multiple times
-    // 2. You try to lock the data from the wrong interrupt
-    // 3. You never initialized the data
-    //
-    // If you avoid these three things, it should always be
-    // safe to unwrap the return values
-    FOO.try_lock(|foo| {
-        BAR.try_lock(|bar| {
-            uart0_inner(foo, bar);
-        }).unwrap();
-    }).unwrap();
-}
+#[exception]
+fn SysTick() {
+    SYSTICK_DATA
+        .try_lock(|data| {
+            // Blink the LED
+            if data.toggle {
+                data.led.enable();
+            } else {
+                data.led.disable();
+            }
 
-fn uart0_inner(foo: &mut Foo, bar: &mut Bar) {
-    foo.some_foo_method();
-    bar.some_bar_method();
+            data.toggle = !data.toggle;
+        })
+        .ok();
 }
 
 #[interrupt]
-fn TIMER0() {
-    BAZ.try_lock(|baz| {
-        // Do something with baz...
-    }).unwrap();
+fn TIMER1() {
+    TIMER_1_DATA
+        .try_lock(|data| {
+            // Start the timer again first for accuracy
+            data.timer.cancel().unwrap();
+            data.timer.start(1_000_000u32);
 
-    // This doesn't work, and will panic at
-    // runtime because it is the wrong interrupt
-    //
-    // FOO.try_lock(|foo| {
-    //     // Do something with foo...
-    // }).unwrap();
-}
+            // Write message to UART. The NRF UART requires data
+            // to be in RAM, not flash.
+            const MSG_BYTES: &[u8] = "Blink!\r\n".as_bytes();
+            let mut buf = [0u8; MSG_BYTES.len()];
+            buf.copy_from_slice(MSG_BYTES);
 
-fn not_an_interrupt() {
-    // This doesn't work, and will panic at
-    // runtime because we're not in an interrupt
-    //
-    // FOO.try_lock(|foo| {
-    //     // Do something with foo...
-    // }).unwrap();
+            data.uart.write(&buf).unwrap();
+
+            // Blink the LED
+            if data.toggle {
+                data.led.enable();
+            } else {
+                data.led.disable();
+            }
+
+            data.toggle = !data.toggle;
+        })
+        .ok();
 }
 ```
 
